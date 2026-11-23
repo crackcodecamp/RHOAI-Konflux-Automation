@@ -222,6 +222,13 @@ class snapshot_processor:
                 tags = qc.get_all_tags(repo, version_tag)
                 if not tags:
                     print(f'no tags found for {repo}')
+
+                # Sort tags by last_modified (newest first) so we always pick
+                # the most recent signed image, not whichever appears first in
+                # quay's response. This prevents picking up a stale on-push
+                # build when the on-schedule nightly build is the intended one.
+                tags = sorted(tags, key=lambda t: t.get('last_modified', ''), reverse=True)
+
                 for tag in tags:
                     sig_tag = f'{tag["manifest_digest"].replace(":", "-")}.sig'
                     signature = qc.get_tag_details(repo, sig_tag)
