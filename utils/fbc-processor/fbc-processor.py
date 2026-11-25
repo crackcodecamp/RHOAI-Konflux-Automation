@@ -51,17 +51,16 @@ class fbc_processor:
     def parse_patch_yaml(self):
         return yaml.safe_load(open(self.patch_yaml_path))
     def patch_catalog_yaml(self):
-        patched = self.patch_olm_bundles()
+        self.patch_olm_bundles()
 
-        if patched:
-            if 'olm.package' in self.patch_dict['patch']:
-                self.patch_olm_package()
-            if 'olm.channels' in self.patch_dict['patch']:
-                self.patch_olm_channels()
+        if 'olm.package' in self.patch_dict['patch']:
+            self.patch_olm_package()
+        if 'olm.channels' in self.patch_dict['patch']:
+            self.patch_olm_channels()
 
-            self.process_push_pipeline()
-            self.purge_unused_olm_bundles()
-            self.write_output_catalog()
+        self.process_push_pipeline()
+        self.purge_unused_olm_bundles()
+        self.write_output_catalog()
 
     def write_output_catalog(self):
         docs = [doc for schema, schema_val in self.catalog_dict.items() for name, doc in schema_val.items()]
