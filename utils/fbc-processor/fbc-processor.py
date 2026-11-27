@@ -22,6 +22,9 @@ class fbc_processor:
         self.output_file_path = output_file_path
         self.catalog_dict:defaultdict = self.parse_catalog_yaml()
         self.purge_olm_bundles(purge_bundles.split(","))
+        # names removed via --purge-bundles are a deliberate operator action;
+        # channel references to them are pre-existing and not guarded below
+        self.explicitly_purged = [name for name in purge_bundles.split(',') if name.strip()]
         self.patch_dict = self.parse_patch_yaml()
         self.build_config = yaml.safe_load(open(self.build_config_path))
         self.current_olm_bundle = self.parse_single_bundle_catalog()
@@ -60,6 +63,7 @@ class fbc_processor:
 
         self.process_push_pipeline()
         self.purge_unused_olm_bundles()
+        self.validate_channel_references()
         self.write_output_catalog()
 
     def write_output_catalog(self):
@@ -159,6 +163,32 @@ class fbc_processor:
         to_delete = [name for name in self.catalog_dict['olm.bundle'] if name not in referenced_bundles]
         print(f'to_delete: {to_delete}')
         self.purge_olm_bundles(to_delete)
+
+    def validate_channel_references(self):
+        # Fail before writing a catalog whose channel entries reference missing olm.bundles.
+        # Catches the stale-nightly-image race (RHOAI-Build-Config rhoai-2.25, 2026-11-27):
+        # extract-snapshot-images picked an older signed image from the Quay tag whose CSV
+        # was still 2.25.13, while catalog-patch.yaml's channel entries referenced
+        # rhods-operator.2.25.14. patch_olm_bundles() had nothing to add (2.25.13 was
+        # already in the PCC base), patch_olm_channels() still wrote the 2.25.14 entries,
+        # and the regenerated catalog shipped dangling channel references that only
+        # failed later inside the Konflux FBC build (opm serve).
+        catalog_bundles = set(self.catalog_dict['olm.bundle'].keys())
+        catalog_bundles.update(getattr(self, 'explicitly_purged', []))
+        dangling = {}
+        for channel_name, channel_obj in self.catalog_dict['olm.channel'].items():
+            missing = sorted({entry['name'] for entry in channel_obj['entries'] if entry['name'] not in catalog_bundles})
+            if missing:
+                dangling[channel_name] = missing
+        if not dangling:
+            return
+        for channel_name, missing in sorted(dangling.items()):
+            print(f'error: channel {channel_name} references missing olm.bundle(s): {", ".join(missing)}')
+        print(f'error: bundle from single-bundle catalog: {self.current_olm_bundle["name"]}')
+        print(f'error: the single-bundle catalog version does not match the channel entries in {self.patch_yaml_path}; '
+              'the bundle image picked from the registry is likely stale (newer tag not signed yet, '
+              'or the tag was moved by a concurrent build)')
+        sys.exit(1)
              
         
         

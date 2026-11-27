@@ -408,3 +408,40 @@ class TestPatchCatalog:
         )
         clone.assert_not_called()
         assert 'COMP_GIT_URL' in processor.catalog_build_args
+
+    def test_dangling_channel_reference_fails_patch(self, processor_factory, tmp_path):
+        """
+        Channel entries referencing a bundle that is not in the catalog must
+        fail the patch instead of writing a catalog with dangling references
+        (stale-bundle-image race, rhoai-2.25 nightly 2026-11-27: SBC carried
+        rhods-operator.2.25.13 while catalog-patch.yaml channels referenced
+        rhods-operator.2.25.14).
+        """
+        # SBC bundle is NEW (gets added), but the patch channel references a
+        # different, missing bundle.
+        patch_dict = make_patch_dict(entry_name='rhods-operator.3.5.1-ea.1')
+        paths = setup_processor_files(tmp_path, patch_dict=patch_dict)
+        processor, _ = processor_factory(paths=paths)
+
+        with pytest.raises(ValueError) as excinfo:
+            processor.patch_catalog()
+        assert 'rhods-operator.3.5.1-ea.1' in str(excinfo.value)
+
+    def test_dangling_channel_reference_fails_when_bundle_already_exists(self, processor_factory, tmp_path):
+        """
+        Same guard on the skip-early path: when the SBC bundle is already in
+        the catalog (patching skipped), a pre-existing dangling reference in
+        the input catalog still fails instead of flowing to the output.
+        """
+        bundle_name = 'rhods-operator.3.5.0-ea.1'
+        catalog_docs = [
+            make_package(),
+            make_channel('fast', [bundle_name, 'rhods-operator.3.5.1-ea.1']),
+            make_bundle(bundle_name, 'registry.redhat.io/rhoai/odh-operator-bundle@sha256:existing'),
+        ]
+        paths = setup_processor_files(tmp_path, catalog_docs=catalog_docs)
+        processor, _ = processor_factory(paths=paths)
+
+        with pytest.raises(ValueError) as excinfo:
+            processor.patch_catalog()
+        assert 'rhods-operator.3.5.1-ea.1' in str(excinfo.value)

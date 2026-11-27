@@ -2,7 +2,7 @@ import os
 import sys
 import json
 import argparse
-from typing import Dict
+from typing import Dict, List
 from urllib.parse import urlparse
 
 from logger.logger import getLogger
@@ -209,7 +209,8 @@ class fbc_processor:
         # Step 2: Skip catalog patching if this bundle already exists.
         if bundle_name in self.catalog_dict[CONSTANTS.OLM_BUNDLE_SCHEMA]:
             LOGGER.warning(f"  Bundle {bundle_name} already exists in catalog — SKIPPING PATCH.")
-            self._purge_requested_bundles()
+            purged = self._purge_requested_bundles()
+            catalog_util.validate_channel_references(self.catalog_dict, allow_missing=set(purged))
             return
 
         # Step 3: Apply registry/repo replacement to the bundle image
@@ -231,21 +232,26 @@ class fbc_processor:
 
         # Step 7: Purge explicitly named bundles via --purge-bundles.
         # Only removes olm.bundle entries — does NOT remove references from channel entries
-        self._purge_requested_bundles(orphan_bundles)
+        purged = self._purge_requested_bundles(orphan_bundles)
+
+        # Step 8: refuse to write a catalog whose channel entries reference
+        # missing olm.bundles (stale bundle image vs catalog-patch.yaml)
+        catalog_util.validate_channel_references(self.catalog_dict, allow_missing=set(purged))
 
         LOGGER.info("Catalog patched successfully.")
 
-    def _purge_requested_bundles(self, already_purged=None) -> None:
+    def _purge_requested_bundles(self, already_purged=None) -> List[str]:
         """Apply --purge-bundles and report names absent from the catalog."""
         requested = [name.strip() for name in self.purge_bundles.split(",") if name.strip()]
         if not requested:
-            return
+            return []
 
         LOGGER.info(f"  Purging explicitly named bundles: {', '.join(requested)}")
         purged = catalog_util.purge_bundles(self.catalog_dict, requested)
         for name in requested:
             if name not in purged and name not in (already_purged or []):
                 LOGGER.warning(f"  Requested purge bundle not found in catalog: {name}")
+        return purged
 
     def _apply_replacements(self, olm_bundle: Dict) -> Dict:
         """

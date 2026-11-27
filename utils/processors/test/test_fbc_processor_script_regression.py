@@ -26,6 +26,7 @@ regular module; it is loaded by path via importlib.
 import importlib.util
 import os
 
+import pytest
 import yaml
 
 SCRIPT_PATH = os.path.abspath(
@@ -127,7 +128,8 @@ def write_yaml(path, data):
         yaml.dump(data, f)
 
 
-def setup_script_processor(tmp_path, base_docs, sbc_bundle_name='rhods-operator.2.25.13'):
+def setup_script_processor(tmp_path, base_docs, sbc_bundle_name='rhods-operator.2.25.13',
+                           patch_entry=None):
     """Write fixture files and build an fbc_processor (script version)."""
     module = load_script_module()
 
@@ -144,7 +146,7 @@ def setup_script_processor(tmp_path, base_docs, sbc_bundle_name='rhods-operator.
         make_channel('stable-2.25', [sbc_bundle_name]),
         make_bundle(sbc_bundle_name, 'quay.io/rhoai/odh-operator-bundle@sha256:sbc'),
     ])
-    write_yaml(patch, make_patch_dict(entry=sbc_bundle_name))
+    write_yaml(patch, make_patch_dict(entry=patch_entry or sbc_bundle_name))
     write_yaml(build_config, make_build_config())
     write_yaml(push_pipeline, make_push_pipeline(enabled=True))
     # the script opens the output path directly; the parent dir must exist
@@ -325,3 +327,69 @@ class TestOriginalBehaviorPreserved:
             'current bundle entry must be merged into the patched channel'
         )
         assert 'rhods-operator.3.5.4' in bundles
+
+
+class TestDanglingChannelReferenceGuard:
+    """Channel entries referencing missing olm.bundles must fail the patch."""
+
+    def test_fails_when_patch_channels_reference_missing_bundle(self, tmp_path, capsys):
+        """
+        The exact production scenario from 2026-11-27 (rhoai-2.25 nightly):
+
+        The Quay nightly tag was picked up carrying a stale image whose CSV
+        was still rhods-operator.2.25.13 (already in the PCC base), while
+        catalog-patch.yaml's channel entries referenced rhods-operator.2.25.14.
+        patch_olm_bundles() had nothing to add, patch_olm_channels() still
+        wrote the 2.25.14 entries, and the always-write committed a catalog
+        with dangling channel references that failed the Konflux FBC build.
+
+        patch_catalog_yaml() must now exit non-zero BEFORE writing the
+        output catalog, naming the dangling references and the stale bundle.
+        """
+        base_docs = [
+            make_package(),
+            make_channel('stable-2.25', ['rhods-operator.2.25.12', 'rhods-operator.2.25.13']),
+            make_bundle('rhods-operator.2.25.12'),
+            make_bundle('rhods-operator.2.25.13'),
+        ]
+        processor, output = setup_script_processor(
+            tmp_path, base_docs,
+            sbc_bundle_name='rhods-operator.2.25.13',   # stale image on the tag
+            patch_entry='rhods-operator.2.25.14',       # what catalog-patch.yaml references
+        )
+
+        assert not os.path.exists(output), 'output must not exist before the run'
+
+        with pytest.raises(SystemExit) as excinfo:
+            processor.patch_catalog_yaml()
+        assert excinfo.value.code == 1
+
+        assert not os.path.exists(output), (
+            'REGRESSION: a catalog with dangling channel references was written '
+            '(stale-bundle-image race, rhoai-2.25 nightly 2026-11-27)'
+        )
+        captured = capsys.readouterr()
+        assert 'rhods-operator.2.25.14' in captured.out, 'error must name the missing bundle'
+        assert 'rhods-operator.2.25.13' in captured.out, 'error must name the stale SBC bundle'
+
+    def test_fails_when_patch_channels_reference_missing_bundle_and_sbc_is_new(self, tmp_path):
+        """
+        Same guard with a NEW single-bundle catalog: the SBC bundle is added
+        fine, but a channel entry referencing a different missing bundle
+        still fails the patch instead of shipping a dangling reference.
+        """
+        base_docs = [
+            make_package(),
+            make_channel('stable-2.25', ['rhods-operator.2.25.12']),
+            make_bundle('rhods-operator.2.25.12'),
+        ]
+        processor, output = setup_script_processor(
+            tmp_path, base_docs,
+            sbc_bundle_name='rhods-operator.2.25.13',
+            patch_entry='rhods-operator.2.25.14',
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            processor.patch_catalog_yaml()
+        assert excinfo.value.code == 1
+        assert not os.path.exists(output), 'no output may be written for a dangling catalog'

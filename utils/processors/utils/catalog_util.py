@@ -119,6 +119,49 @@ def purge_orphan_bundles(catalog_dict: defaultdict) -> List[str]:
     return orphan_bundles
 
 
+def validate_channel_references(catalog_dict: defaultdict, allow_missing: Optional[Set[str]] = None) -> None:
+    """
+    Ensure every channel entry references an olm.bundle present in the catalog.
+
+    Catches the stale-bundle-image race (RHOAI-Build-Config rhoai-2.25,
+    2026-11-27): the single-bundle catalog carried an older CSV version
+    (rhods-operator.2.25.13) while catalog-patch.yaml's channel entries
+    referenced rhods-operator.2.25.14. The regenerated catalog shipped
+    dangling channel references that only failed later inside the Konflux
+    FBC build (opm serve). Failing here surfaces the mismatch at the
+    source with an actionable message instead.
+
+    Args:
+        catalog_dict: Catalog structure to validate.
+        allow_missing: Bundle names whose references are tolerated — bundles
+            removed deliberately via --purge-bundles (a pre-existing operator
+            action, not the accidental stale-image case this guards against).
+
+    Raises:
+        ValueError: listing every channel entry that references a missing bundle.
+    """
+    catalog_bundles = set(catalog_dict[CONSTANTS.OLM_BUNDLE_SCHEMA].keys())
+    catalog_bundles.update(allow_missing or set())
+    dangling: Dict[str, Set[str]] = {}
+    for channel_name, channel_obj in catalog_dict[CONSTANTS.OLM_CHANNEL_SCHEMA].items():
+        missing = {entry['name'] for entry in channel_obj['entries']
+                   if entry['name'] not in catalog_bundles}
+        if missing:
+            dangling[channel_name] = missing
+    if not dangling:
+        return
+    for channel_name, missing in sorted(dangling.items()):
+        LOGGER.error(f"  Channel {channel_name} references missing olm.bundle(s): "
+                     f"{', '.join(sorted(missing))}")
+    raise ValueError(
+        'catalog channel entries reference missing olm.bundles — the single-bundle '
+        'catalog version does not match catalog-patch.yaml; the bundle image picked '
+        'from the registry is likely stale (newer tag not signed yet, or the tag '
+        'was moved by a concurrent build): '
+        + '; '.join(f'{c}: {", ".join(sorted(m))}' for c, m in sorted(dangling.items()))
+    )
+
+
 
 def patch_olm_package(catalog_dict: defaultdict, patch_dict: Dict) -> None:
     """
